@@ -1,12 +1,23 @@
 package mirror
 
 import (
+	"bytes"
 	"io/ioutil"
 	"os"
 	"testing"
 
 	"github.com/cybozu-go/aptutil/apt"
 )
+
+func makeFileInfo(path string, data []byte) (*apt.FileInfo, error) {
+	rb := bytes.NewReader(data)
+	wb := new(bytes.Buffer)
+	fi, err := apt.CopyWithFileInfo(wb, rb, path)
+	if err != nil {
+		return nil, err
+	}
+	return fi, nil
+}
 
 func testStorageBadConstruction(t *testing.T) {
 	t.Parallel()
@@ -60,13 +71,21 @@ func testStorageLookup(t *testing.T) {
 	}
 
 	for fn, data := range files {
-		fi := apt.MakeFileInfo(fn, data)
-		if err := s.Store(fi, data); err != nil {
+		fi, err := makeFileInfo(fn, data)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		rb := bytes.NewReader(data)
+		if err := s.Store(fn, fi, rb); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	fi := apt.MakeFileInfo("a/b/c", []byte{'a', 'b', 'd'})
+	fi, err := makeFileInfo("a/b/c", []byte{'a', 'b', 'd'})
+	if err != nil {
+		t.Fatal(err)
+	}
 	fi2, fullpath := s.Lookup(fi, false)
 	if fi2 != nil {
 		t.Error(`fi2 != nil`)
@@ -75,7 +94,11 @@ func testStorageLookup(t *testing.T) {
 		t.Error(`len(fullpath) != 0`)
 	}
 
-	fi3, _ := s.Lookup(apt.MakeFileInfo("a/b/c", files["a/b/c"]), false)
+	fi, err = makeFileInfo("a/b/c", files["a/b/c"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi3, _ := s.Lookup(fi, false)
 	if fi3 == nil {
 		t.Error(`fi3 == nil`)
 	}
@@ -92,19 +115,38 @@ func testStorageLookup(t *testing.T) {
 		t.Error(err)
 	}
 
-	fi4, _ := s2.Lookup(apt.MakeFileInfo("a/b/c", files["a/b/c"]), false)
+	fi, err = makeFileInfo("a/b/c", files["a/b/c"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi4, _ := s2.Lookup(fi, false)
 	if fi4 == nil {
 		t.Error(`fi4 == nil`)
 	}
-	fi5, _ := s2.Lookup(apt.MakeFileInfo("def", files["def"]), false)
+
+	fi, err = makeFileInfo("def", files["def"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi5, _ := s2.Lookup(fi, false)
 	if fi5 == nil {
 		t.Error(`fi5 == nil`)
 	}
-	fi6, _ := s2.Lookup(apt.MakeFileInfo("a/pp/le", files["a/pp/le"]), false)
+
+	fi, err = makeFileInfo("a/pp/le", files["a/pp/le"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi6, _ := s2.Lookup(fi, false)
 	if fi6 == nil {
 		t.Error(`fi6 == nil`)
 	}
-	fi7, _ := s2.Lookup(apt.MakeFileInfo("a/pp/le", files["def"]), false)
+
+	fi, err = makeFileInfo("a/pp/le", files["def"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi7, _ := s2.Lookup(fi, false)
 	if fi7 != nil {
 		t.Error(`fi7 != nil`)
 	}
@@ -131,9 +173,13 @@ func testStorageStore(t *testing.T) {
 
 	fn := "a/b/c"
 	data := []byte{'a', 'b', 'c'}
-	fi := apt.MakeFileInfo(fn, data)
+	fi, err := makeFileInfo(fn, data)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	err = s.Store(fi, data)
+	rb := bytes.NewReader(data)
+	err = s.Store(fn, fi, rb)
 	if err != nil {
 		t.Error(err)
 	}
@@ -143,15 +189,20 @@ func testStorageStore(t *testing.T) {
 	}
 
 	// duplicates should not be granted
-	err = s.Store(fi, data)
+	rb = bytes.NewReader(data)
+	err = s.Store(fn, fi, rb)
 	if err == nil {
 		t.Error(`err == nil`)
 	}
 
 	data2 := []byte{'d', 'e', 'f'}
-	fi2 := apt.MakeFileInfo(fn, data2)
+	fi2, err := makeFileInfo(fn, data2)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	err = s.StoreWithHash(fi2, data2)
+	rb = bytes.NewReader(data2)
+	err = s.StoreWithHash(fn, fi2, rb)
 	if err != nil {
 		t.Error(err)
 	}

@@ -1,9 +1,9 @@
 package mirror
 
 import (
-	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -107,11 +107,11 @@ func NewMirror(t time.Time, id string, c *Config) (*Mirror, error) {
 	return mr, nil
 }
 
-func (m *Mirror) store(fi *apt.FileInfo, data []byte, byhash bool) error {
+func (m *Mirror) store(p string, fi *apt.FileInfo, r io.Reader, byhash bool) error {
 	if byhash {
-		return m.storage.StoreWithHash(fi, data)
+		return m.storage.StoreWithHash(p, fi, r)
 	}
-	return m.storage.Store(fi, data)
+	return m.storage.Store(p, fi, r)
 }
 
 func (m *Mirror) storeLink(fi *apt.FileInfo, fp string, byhash bool) error {
@@ -274,7 +274,6 @@ type dlResult struct {
 	status int
 	path   string
 	fi     *apt.FileInfo
-	data   []byte
 	err    error
 }
 
@@ -339,18 +338,11 @@ RETRY:
 			log.FnHTTPStatusCode: resp.StatusCode,
 		})
 	}
-
+	defer func() {
+		io.Copy(ioutil.Discard, resp.Body)
+		resp.Body.Close()
+	}()
 	r.status = resp.StatusCode
-	data, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		if retries < httpRetries {
-			retries++
-			goto RETRY
-		}
-		r.err = err
-		return
-	}
 	if r.status >= 500 && retries < httpRetries {
 		retries++
 		goto RETRY
@@ -359,22 +351,22 @@ RETRY:
 		return
 	}
 
-	fi2 := apt.MakeFileInfo(p, data)
-	if fi != nil && !fi.Same(fi2) {
-		if len(targets) > 1 {
-			targets = targets[1:]
-			log.Warn("try by-hash retrieval", map[string]interface{}{
-				"repo":   m.id,
-				"path":   p,
-				"target": targets[0],
-			})
-			goto RETRY
-		}
-		r.err = errors.New("invalid checksum for " + p)
+	err = m.store(p, fi, resp.Body, byhash)
+
+	if err == ErrInvalidData && len(targets) > 1 {
+		targets = targets[1:]
+		log.Warn("try by-hash retrieval", map[string]interface{}{
+			"repo":   m.id,
+			"path":   p,
+			"target": targets[0],
+		})
+		goto RETRY
+	}
+	if err != nil {
+		r.err = err
 		return
 	}
-	r.fi = fi2
-	r.data = data
+	r.fi = fi
 }
 
 func addFileInfoToList(fi *apt.FileInfo, m map[string][]*apt.FileInfo, byhash bool) error {
@@ -429,12 +421,13 @@ func (m *Mirror) downloadRelease(ctx context.Context, suite string) (map[string]
 			return nil, byhash, fmt.Errorf("status %d for %s", r.status, r.path)
 		}
 
-		// 200 OK
-		err := m.storage.Store(r.fi, r.data)
+		f, err := m.storage.Open(r.path)
 		if err != nil {
-			return nil, byhash, errors.Wrap(err, "storage.Store")
+			return nil, byhash, err
 		}
-		fil, d, err := apt.ExtractFileInfo(r.path, bytes.NewReader(r.data))
+
+		fil, d, err := apt.ExtractFileInfo(r.path, f)
+		f.Close()
 		if err != nil {
 			return nil, byhash, errors.Wrap(err, "ExtractFileInfo: "+r.path)
 		}
@@ -593,11 +586,6 @@ func (m *Mirror) recvResult(allowMissing, byhash bool, results <-chan *dlResult)
 
 		if r.status != http.StatusOK {
 			return nil, fmt.Errorf("status %d for %s", r.status, r.path)
-		}
-
-		err := m.store(r.fi, r.data, byhash)
-		if err != nil {
-			return nil, errors.Wrap(err, "store")
 		}
 
 		dlfil = append(dlfil, r.fi)

@@ -2,6 +2,7 @@ package cacher
 
 import (
 	"container/heap"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -22,6 +23,9 @@ var (
 
 	// ErrBadPath is returned by Storage.Insert if path is bad
 	ErrBadPath = errors.New("bad path")
+
+	// ErrInvalidData is returned by Storage.Insert if retrieved data is invalid
+	ErrInvalidData = errors.New("can not insert invalid data")
 )
 
 // entry represents an item in the cache.
@@ -188,35 +192,39 @@ func (cm *Storage) Load() error {
 
 // Insert inserts or updates a cache item.
 //
-// fi.Path() must be as clean as filepath.Clean() and
+// p must be as clean as filepath.Clean() and
 // must not be filepath.IsAbs().
-func (cm *Storage) Insert(data []byte, fi *apt.FileInfo) error {
-	p := fi.Path()
+func (cm *Storage) Insert(r io.Reader, p string, fi *apt.FileInfo) (*apt.FileInfo, error) {
 	switch {
 	case p != filepath.Clean(p):
-		return ErrBadPath
+		return nil, ErrBadPath
 	case filepath.IsAbs(p):
-		return ErrBadPath
+		return nil, ErrBadPath
 	case p == ".":
-		return ErrBadPath
+		return nil, ErrBadPath
 	}
 
 	f, err := ioutil.TempFile(cm.dir, "_tmp")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() {
 		f.Close()
 		os.Remove(f.Name())
 	}()
 
-	_, err = f.Write(data)
+	fi2, err := apt.CopyWithFileInfo(f, r, p)
 	if err != nil {
-		return err
+		return nil, err
 	}
+
 	err = f.Sync()
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	if fi != nil && fi.HasChecksum() && !fi.Same(fi2) {
+		return nil, ErrInvalidData
 	}
 
 	destpath := filepath.Join(cm.dir, p+fileSuffix)
@@ -227,10 +235,10 @@ func (cm *Storage) Insert(data []byte, fi *apt.FileInfo) error {
 	case os.IsNotExist(err):
 		err = os.MkdirAll(dirpath, 0755)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	case err != nil:
-		return err
+		return nil, err
 	}
 
 	cm.mu.Lock()
@@ -240,7 +248,7 @@ func (cm *Storage) Insert(data []byte, fi *apt.FileInfo) error {
 		err = os.Remove(destpath)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return err
+				return nil, err
 			}
 			log.Warn("cache file was removed already", map[string]interface{}{
 				"path": p,
@@ -258,21 +266,21 @@ func (cm *Storage) Insert(data []byte, fi *apt.FileInfo) error {
 
 	err = os.Rename(f.Name(), destpath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	e := &entry{
-		FileInfo: fi,
+		FileInfo: fi2,
 		atime:    cm.lclock,
 	}
-	cm.used += fi.Size()
+	cm.used += fi2.Size()
 	cm.lclock++
 	heap.Push(cm, e)
 	cm.cache[p] = e
 
 	cm.maint()
 
-	return nil
+	return fi2, nil
 }
 
 func calcChecksum(dir string, e *entry) error {

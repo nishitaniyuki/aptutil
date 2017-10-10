@@ -4,9 +4,7 @@ package cacher
 // repository items.
 
 import (
-	"bytes"
 	"context"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -307,8 +305,6 @@ func (c *Cacher) download(ctx context.Context, p string, u *url.URL, valid *apt.
 		})
 		return
 	}
-	body, err := ioutil.ReadAll(resp.Body)
-	resp.Body.Close()
 
 	statusCode = resp.StatusCode
 	if statusCode != 200 {
@@ -323,24 +319,47 @@ func (c *Cacher) download(ctx context.Context, p string, u *url.URL, valid *apt.
 		return
 	}
 
-	fi := apt.MakeFileInfo(p, body)
-	if valid != nil && !valid.Same(fi) {
-		log.Warn("downloaded data is not valid", map[string]interface{}{
-			"url": u.String(),
-		})
-		return
-	}
-
 	storage := c.items
+	if apt.IsMeta(p) {
+		storage = c.meta
+	}
 	var fil []*apt.FileInfo
 	t := strings.SplitN(path.Clean(p), "/", 2)
 	if len(t) != 2 {
 		panic("path must has a prefix: " + p)
 	}
 
+	c.fiLock.Lock()
+	defer c.fiLock.Unlock()
+
+	fi, err := storage.Insert(resp.Body, p, valid)
+	resp.Body.Close()
+	if err == ErrInvalidData {
+		log.Warn("downloaded data is not valid", map[string]interface{}{
+			"url": u.String(),
+		})
+		return
+	}
+	if err != nil {
+		log.Error("could not save an item", map[string]interface{}{
+			"path":  p,
+			"error": err.Error(),
+		})
+		// panic because go-apt-cacher cannot continue working
+		panic(err)
+	}
+
 	if apt.IsMeta(p) {
-		storage = c.meta
-		fil, _, err = apt.ExtractFileInfo(t[1], bytes.NewReader(body))
+		f, err := storage.Lookup(fi)
+		if err != nil {
+			log.Error("could not find an item", map[string]interface{}{
+				"path":  p,
+				"error": err.Error(),
+			})
+			panic(err)
+		}
+		defer f.Close()
+		fil, _, err = apt.ExtractFileInfo(t[1], f)
 		if err != nil {
 			log.Error("invalid meta data", map[string]interface{}{
 				"path":  p,
@@ -349,18 +368,6 @@ func (c *Cacher) download(ctx context.Context, p string, u *url.URL, valid *apt.
 			// do not return; we accept broken meta data as is.
 		}
 		fil = addPrefix(t[0], fil)
-	}
-
-	c.fiLock.Lock()
-	defer c.fiLock.Unlock()
-
-	if err := storage.Insert(body, fi); err != nil {
-		log.Error("could not save an item", map[string]interface{}{
-			"path":  p,
-			"error": err.Error(),
-		})
-		// panic because go-apt-cacher cannot continue working
-		panic(err)
 	}
 
 	for _, fi2 := range fil {

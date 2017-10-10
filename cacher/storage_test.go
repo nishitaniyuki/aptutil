@@ -10,6 +10,16 @@ import (
 	"github.com/cybozu-go/aptutil/apt"
 )
 
+func makeFileInfo(path string, data []byte) (*apt.FileInfo, error) {
+	rb := bytes.NewReader(data)
+	wb := new(bytes.Buffer)
+	fi, err := apt.CopyWithFileInfo(wb, rb, path)
+	if err != nil {
+		return nil, err
+	}
+	return fi, nil
+}
+
 func TestStorage(t *testing.T) {
 	t.Parallel()
 
@@ -22,7 +32,13 @@ func TestStorage(t *testing.T) {
 	cm := NewStorage(dir, 0)
 
 	data := []byte{'a'}
-	err = cm.Insert(data, apt.MakeFileInfo("path/to/a", data))
+	p := "path/to/a"
+	fi, err := makeFileInfo(p, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb := bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +50,8 @@ func TestStorage(t *testing.T) {
 	}
 
 	// overwrite
-	err = cm.Insert(data, apt.MakeFileInfo("path/to/a", data))
+	rb = bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +63,13 @@ func TestStorage(t *testing.T) {
 	}
 
 	data = []byte{'b', 'c'}
-	err = cm.Insert(data, apt.MakeFileInfo("path/to/bc", data))
+	p = "path/to/bc"
+	fi, err = makeFileInfo(p, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb = bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,17 +81,21 @@ func TestStorage(t *testing.T) {
 	}
 
 	data = []byte{'d', 'a', 't', 'a'}
-	err = cm.Insert(data, apt.MakeFileInfo("data", data))
+	p = "data"
+	fi, err = makeFileInfo(p, data)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	f, err := cm.Lookup(apt.MakeFileInfo("data", data))
+	rb = bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := cm.Lookup(fi)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-
 	data2, err := ioutil.ReadAll(f)
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +105,11 @@ func TestStorage(t *testing.T) {
 	}
 
 	differentData := []byte{'d', 'a', 't', '.'}
-	_, err = cm.Lookup(apt.MakeFileInfo("data", differentData))
+	fi, err = makeFileInfo("data", differentData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cm.Lookup(fi)
 	if err != ErrNotFound {
 		t.Error(`err != ErrNotFound`)
 	}
@@ -107,12 +138,25 @@ func TestStorageLRU(t *testing.T) {
 	cm := NewStorage(dir, 3)
 
 	dataA := []byte{'a'}
-	err = cm.Insert(dataA, apt.MakeFileInfo("path/to/a", dataA))
+	pA := "path/to/a"
+	fiA, err := makeFileInfo(pA, dataA)
 	if err != nil {
 		t.Fatal(err)
 	}
+	rb := bytes.NewReader(dataA)
+	_, err = cm.Insert(rb, pA, fiA)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	dataBC := []byte{'b', 'c'}
-	err = cm.Insert(dataBC, apt.MakeFileInfo("path/to/bc", dataBC))
+	pBC := "path/to/bc"
+	fiBC, err := makeFileInfo(pBC, dataBC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb = bytes.NewReader(dataBC)
+	_, err = cm.Insert(rb, pBC, fiBC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +166,13 @@ func TestStorageLRU(t *testing.T) {
 
 	// a and bc will be purged
 	dataDE := []byte{'d', 'e'}
-	err = cm.Insert(dataDE, apt.MakeFileInfo("path/to/de", dataDE))
+	pDE := "path/to/de"
+	fiDE, err := makeFileInfo(pDE, dataDE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb = bytes.NewReader(dataDE)
+	_, err = cm.Insert(rb, pDE, fiDE)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,42 +183,49 @@ func TestStorageLRU(t *testing.T) {
 		t.Error(`cm.used != 2`)
 	}
 
-	_, err = cm.Lookup(apt.MakeFileInfo("path/to/a", dataA))
+	_, err = cm.Lookup(fiA)
 	if err != ErrNotFound {
 		t.Error(`err != ErrNotFound`)
 	}
-	_, err = cm.Lookup(apt.MakeFileInfo("path/to/bc", dataBC))
+	_, err = cm.Lookup(fiBC)
 	if err != ErrNotFound {
 		t.Error(`err != ErrNotFound`)
 	}
 
-	err = cm.Insert(dataA, apt.MakeFileInfo("path/to/a", dataA))
+	rb = bytes.NewReader(dataA)
+	_, err = cm.Insert(rb, pA, fiA)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// touch de
-	_, err = cm.Lookup(apt.MakeFileInfo("path/to/de", dataDE))
+	_, err = cm.Lookup(fiDE)
 	if err != nil {
 		t.Error(err)
 	}
 
 	// a will be purged
 	dataF := []byte{'f'}
-	err = cm.Insert(dataF, apt.MakeFileInfo("path/to/f", dataF))
+	pF := "path/to/f"
+	fiF, err := makeFileInfo(pF, dataF)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rb = bytes.NewReader(dataF)
+	_, err = cm.Insert(rb, pF, fiF)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = cm.Lookup(apt.MakeFileInfo("path/to/a", dataA))
+	_, err = cm.Lookup(fiA)
 	if err != ErrNotFound {
 		t.Error(`err != ErrNotFound`)
 	}
-	_, err = cm.Lookup(apt.MakeFileInfo("path/to/de", dataDE))
+	_, err = cm.Lookup(fiDE)
 	if err != nil {
 		t.Error(err)
 	}
-	_, err = cm.Lookup(apt.MakeFileInfo("path/to/f", dataF))
+	_, err = cm.Lookup(fiF)
 	if err != nil {
 		t.Error(err)
 	}
@@ -211,23 +268,39 @@ func TestStorageLoad(t *testing.T) {
 		t.Error(`len(l) != len(files)`)
 	}
 
-	f, err := cm.Lookup(apt.MakeFileInfo("a", files["a"]))
+	fi, err := makeFileInfo("a", files["a"])
+	if err != nil {
+		t.Error(err)
+	}
+	f, err := cm.Lookup(fi)
 	if err != nil {
 		t.Error(err)
 	}
 	f.Close()
-	f, err = cm.Lookup(apt.MakeFileInfo("bc", files["bc"]))
+	fi, err = makeFileInfo("bc", files["bc"])
+	if err != nil {
+		t.Error(err)
+	}
+	f, err = cm.Lookup(fi)
 	if err != nil {
 		t.Error(err)
 	}
 	f.Close()
-	f, err = cm.Lookup(apt.MakeFileInfo("def", files["def"]))
+	fi, err = makeFileInfo("def", files["def"])
+	if err != nil {
+		t.Error(err)
+	}
+	f, err = cm.Lookup(fi)
 	if err != nil {
 		t.Error(err)
 	}
 	f.Close()
 
-	f, err = cm.Lookup(apt.MakeFileInfo("ghij", files["ghij"]))
+	fi, err = makeFileInfo("ghij", files["ghij"])
+	if err != nil {
+		t.Error(err)
+	}
+	f, err = cm.Lookup(fi)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,22 +327,46 @@ func TestStoragePathTraversal(t *testing.T) {
 	cm := NewStorage(dir, 0)
 
 	data := []byte{'a'}
-	err = cm.Insert(data, apt.MakeFileInfo("/absolute/path", data))
+	p := "/absolute/path"
+	fi, err := makeFileInfo(p, data)
+	if err != nil {
+		t.Error(err)
+	}
+	rb := bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != ErrBadPath {
 		t.Error(`/absolute/path must be a bad path`)
 	}
 
-	err = cm.Insert(data, apt.MakeFileInfo("./unclean/path", data))
+	p = "./unclean/path"
+	fi, err = makeFileInfo(p, data)
+	if err != nil {
+		t.Error(err)
+	}
+	rb = bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != ErrBadPath {
 		t.Error(`./unclean/path must be a bad path`)
 	}
 
-	err = cm.Insert(data, apt.MakeFileInfo("", data))
+	p = ""
+	fi, err = makeFileInfo(p, data)
+	if err != nil {
+		t.Error(err)
+	}
+	rb = bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != ErrBadPath {
 		t.Error(`empty path must be a bad path`)
 	}
 
-	err = cm.Insert(data, apt.MakeFileInfo(".", data))
+	p = "."
+	fi, err = makeFileInfo(p, data)
+	if err != nil {
+		t.Error(err)
+	}
+	rb = bytes.NewReader(data)
+	_, err = cm.Insert(rb, p, fi)
 	if err != ErrBadPath {
 		t.Error(`. must be a bad path`)
 	}

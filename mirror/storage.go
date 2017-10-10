@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"encoding/json"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -13,6 +14,11 @@ import (
 
 const (
 	infoJSON = "info.json"
+)
+
+var (
+	// ErrInvalidData is returned by Storage.Store and Storage.StoreWithHash if retrieved data is invalid
+	ErrInvalidData = errors.New("can not store invalid data")
 )
 
 // Storage manages a directory tree that mirrors a Debian repository.
@@ -102,9 +108,7 @@ func (s *Storage) Save() error {
 }
 
 // Store stores a file into this storage.
-func (s *Storage) Store(fi *apt.FileInfo, data []byte) error {
-	p := fi.Path()
-
+func (s *Storage) Store(p string, fi *apt.FileInfo, r io.Reader) error {
 	s.mu.Lock()
 	_, ok := s.info[p]
 	if ok {
@@ -122,23 +126,40 @@ func (s *Storage) Store(fi *apt.FileInfo, data []byte) error {
 		return err
 	}
 
-	f, err := os.OpenFile(fp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	tmpf, err := ioutil.TempFile(d, filepath.Base(fp))
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		tmpf.Close()
+		os.Remove(tmpf.Name())
+	}()
 
-	_, err = f.Write(data)
+	fi2, err := apt.CopyWithFileInfo(tmpf, r, p)
 	if err != nil {
 		return err
 	}
-	return f.Sync()
+
+	err = tmpf.Sync()
+	if err != nil {
+		return err
+	}
+	err = os.Chmod(tmpf.Name(), 0644)
+	if err != nil {
+		return errors.Wrap(err, "StoreWithHash")
+	}
+
+	if fi != nil && fi.HasChecksum() && !fi.Same(fi2) {
+		return ErrInvalidData
+	}
+
+	return os.Link(tmpf.Name(), fp)
 }
 
 // StoreWithHash stores a file into this storage with additional
 // hard links for by-hash retrieval.
-func (s *Storage) StoreWithHash(fi *apt.FileInfo, data []byte) error {
-	fp := filepath.Join(s.dir, s.prefix, filepath.Clean(fi.Path()))
+func (s *Storage) StoreWithHash(p string, fi *apt.FileInfo, r io.Reader) error {
+	fp := filepath.Join(s.dir, s.prefix, filepath.Clean(p))
 	d := filepath.Dir(fp)
 
 	err := os.MkdirAll(d, 0755)
@@ -146,26 +167,31 @@ func (s *Storage) StoreWithHash(fi *apt.FileInfo, data []byte) error {
 		return err
 	}
 
-	tmpf, err := ioutil.TempFile(d, "tmp")
+	tmpf, err := ioutil.TempFile(d, filepath.Base(fp))
 	if err != nil {
-		return errors.Wrap(err, "StoreWithHash")
+		return err
 	}
 	defer func() {
 		tmpf.Close()
 		os.Remove(tmpf.Name())
 	}()
 
-	_, err = tmpf.Write(data)
+	fi2, err := apt.CopyWithFileInfo(tmpf, r, p)
 	if err != nil {
-		return errors.Wrap(err, "StoreWithHash")
+		return err
 	}
+
 	err = tmpf.Sync()
 	if err != nil {
-		return errors.Wrap(err, "StoreWithHash")
+		return err
 	}
 	err = os.Chmod(tmpf.Name(), 0644)
 	if err != nil {
 		return errors.Wrap(err, "StoreWithHash")
+	}
+
+	if fi.HasChecksum() && !fi.Same(fi2) {
+		return ErrInvalidData
 	}
 
 	return s.StoreLinkWithHash(fi, tmpf.Name())
