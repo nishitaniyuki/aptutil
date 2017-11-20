@@ -180,7 +180,7 @@ func testFileInfoChecksum(t *testing.T) {
 	md5sum := md5.Sum([]byte(text))
 	sha1sum := sha1.Sum([]byte(text))
 	sha256sum := sha256.Sum256([]byte(text))
-	md5 := hex.EncodeToString(md5sum[:])
+	m5 := hex.EncodeToString(md5sum[:])
 	s1 := hex.EncodeToString(sha1sum[:])
 	s256 := hex.EncodeToString(sha256sum[:])
 
@@ -189,7 +189,7 @@ func testFileInfoChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if fi.MD5SumPath() != "/abc/by-hash/MD5Sum/"+md5 {
+	if fi.MD5SumPath() != "/abc/by-hash/MD5Sum/"+m5 {
 		t.Error(`fi.MD5SumPath() != "/abc/by-hash/MD5Sum/" + md5`)
 	}
 	if fi.SHA1Path() != "/abc/by-hash/SHA1/"+s1 {

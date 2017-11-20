@@ -218,6 +218,11 @@ func (m *Mirror) Update(ctx context.Context) error {
 	return nil
 }
 
+func closeRespBody(r *http.Response) {
+	io.Copy(ioutil.Discard, r.Body)
+	r.Body.Close()
+}
+
 // updateSuite partially updates mirror for a suite.
 func (m *Mirror) updateSuite(ctx context.Context, suite string, itemMap map[string]*apt.FileInfo) error {
 	log.Info("download Release/InRelease", map[string]interface{}{
@@ -338,10 +343,7 @@ RETRY:
 			log.FnHTTPStatusCode: resp.StatusCode,
 		})
 	}
-	defer func() {
-		io.Copy(ioutil.Discard, resp.Body)
-		resp.Body.Close()
-	}()
+	defer closeRespBody(resp)
 	r.status = resp.StatusCode
 	if r.status >= 500 && retries < httpRetries {
 		retries++

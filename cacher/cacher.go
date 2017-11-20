@@ -5,6 +5,8 @@ package cacher
 
 import (
 	"context"
+	"io"
+	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -223,6 +225,11 @@ func (c *Cacher) maintRelease(ctx context.Context, p string, withGPG bool) {
 	}
 }
 
+func closeRespBody(r *http.Response) {
+	io.Copy(ioutil.Discard, r.Body)
+	r.Body.Close()
+}
+
 // Download downloads an item and caches it.
 //
 // If valid is not nil, the downloaded data is validated against it.
@@ -306,16 +313,9 @@ func (c *Cacher) download(ctx context.Context, p string, u *url.URL, valid *apt.
 		return
 	}
 
+	defer closeRespBody(resp)
 	statusCode = resp.StatusCode
 	if statusCode != 200 {
-		return
-	}
-
-	if err != nil {
-		log.Warn("GET failed", map[string]interface{}{
-			"url":   u.String(),
-			"error": err.Error(),
-		})
 		return
 	}
 
@@ -333,7 +333,6 @@ func (c *Cacher) download(ctx context.Context, p string, u *url.URL, valid *apt.
 	defer c.fiLock.Unlock()
 
 	fi, err := storage.Insert(resp.Body, p, valid)
-	resp.Body.Close()
 	if err == ErrInvalidData {
 		log.Warn("downloaded data is not valid", map[string]interface{}{
 			"url": u.String(),
