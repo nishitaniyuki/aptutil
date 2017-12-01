@@ -5,10 +5,35 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cybozu-go/aptutil/apt"
 )
+
+func insert(cm *Storage, data []byte, path string) (*apt.FileInfo, error) {
+	f, err := cm.TempFile()
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		f.Close()
+		os.Remove(f.Name())
+	}()
+
+	fi, err := apt.CopyWithFileInfo(f, bytes.NewReader(data), path)
+	if err != nil {
+		return nil, err
+	}
+
+	err = f.Sync()
+	if err != nil {
+		return nil, err
+	}
+
+	err = cm.Insert(f.Name(), fi)
+	return fi, err
+}
 
 func makeFileInfo(path string, data []byte) (*apt.FileInfo, error) {
 	rb := bytes.NewReader(data)
@@ -20,110 +45,123 @@ func makeFileInfo(path string, data []byte) (*apt.FileInfo, error) {
 	return fi, nil
 }
 
-func TestStorage(t *testing.T) {
+func testStorageInsertWorksCorrectly(t *testing.T) {
 	t.Parallel()
-
 	dir, err := ioutil.TempDir("", "gotest")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
-
 	cm := NewStorage(dir, 0)
 
-	data := []byte{'a'}
-	p := "path/to/a"
-	fi, err := makeFileInfo(p, data)
+	fi, err = insert(cm, "a", "path/to/a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb := bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	if cm.Len() != 1 {
 		t.Error(`cm.Len() != 1`)
 	}
-	if cm.used != 1 {
-		t.Error(`cm.used != 1`)
-	}
 
-	// overwrite
-	rb = bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cm.Len() != 1 {
-		t.Error(`cm.Len() != 1`)
-	}
-	if cm.used != 1 {
-		t.Error(`cm.used != 1`)
-	}
-
-	data = []byte{'b', 'c'}
-	p = "path/to/bc"
-	fi, err = makeFileInfo(p, data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb = bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cm.Len() != 2 {
-		t.Error(`cm.Len() != 2`)
-	}
-	if cm.used != 3 {
-		t.Error(`cm.used != 3`)
-	}
-
-	data = []byte{'d', 'a', 't', 'a'}
-	p = "data"
-	fi, err = makeFileInfo(p, data)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rb = bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := cm.Lookup(fi)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	data2, err := ioutil.ReadAll(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Compare(data, data2) != 0 {
-		t.Error(`bytes.Compare(data, data2) != 0`)
-	}
-
-	differentData := []byte{'d', 'a', 't', '.'}
-	fi, err = makeFileInfo("data", differentData)
-	if err != nil {
-		t.Fatal(err)
-	}
 	_, err = cm.Lookup(fi)
-	if err != ErrNotFound {
-		t.Error(`err != ErrNotFound`)
+	if err != nil {
+		t.Error(`cannot lookup inserted file`)
 	}
+}
 
-	err = cm.Delete("data")
+func testStorageInsertOverwrite(t *testing.T) {
+	t.Parallel()
+	dir, err := ioutil.TempDir("", "gotest")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cm.Len() != 2 {
-		t.Error(`cm.Len() != 2`)
+	defer os.RemoveAll(dir)
+	cm := NewStorage(dir, 0)
+
+	fi, err = insert(cm, "a", "path/to/a")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if cm.used != 3 {
-		t.Error(`cm.used != 3`)
+
+	fi, err = insert(cm, "a", "path/to/a")
+	if err != nil {
+		t.Fatal(err)
 	}
+
+	if cm.Len() != 1 {
+		t.Error(`cm.Len() != 1`)
+	}
+
+	_, err = cm.Lookup(fi)
+	if err != nil {
+		t.Error(`cannot lookup inserted file`)
+	}
+}
+
+func testStorageInsertReturnsErrorAgainstBadPath(t *testing.T) {
+	t.Parallel()
+	dir, err := ioutil.TempDir("", "gotest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	cm := NewStorage(dir, 0)
+
+	cases := []struct{ Title, Path string }{
+		{
+			Title: "Absolute path",
+			Path:  "/absolute/path",
+		},
+		{
+			Title: "Uncleaned path",
+			Path:  "./uncleaned/path",
+		},
+		{
+			Title: "Empty path",
+			Path:  "",
+		},
+		{
+			Title: ".",
+			Path:  ".",
+		},
+	}
+
+	for tc := range cases {
+		t.Run(tc.Title, func() {
+			_, err = insert(cm, []byte("a"), tc.Path)
+			if err != ErrBadPath {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func testStorageInsertPurgesFilesAllowingLRU(t *testing.T) {
+	t.Parallel()
+	dir, err := ioutil.TempDir("", "gotest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	cm := NewStorage(dir, 0)
+
+	fiA, err := insert(cm, []byte("a"), "a")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fiBC, err := insert(cm, []byte("bc"), "bc")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+}
+
+func TestStorageInsert(t *testing.T) {
+	t.Run("Storage.Insert should insert data", testStorageInsertWorksCorrectly)
+	t.Run("Storage.Insert should overwrite", testStorageInsertOverwrite)
+	t.Run("Storage.Insert should return error if passed FileInfo path is bad path", testStorageInsertReturnsErrorAgainstBadPath)
+	t.Run("Storage.Insert should purge files allowing LRU", testStorageInsertPurgesFilesAllowingLRU)
 }
 
 func TestStorageLRU(t *testing.T) {
@@ -137,26 +175,42 @@ func TestStorageLRU(t *testing.T) {
 
 	cm := NewStorage(dir, 3)
 
-	dataA := []byte{'a'}
-	pA := "path/to/a"
-	fiA, err := makeFileInfo(pA, dataA)
+	fA, err := storage.TempFile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb := bytes.NewReader(dataA)
-	_, err = cm.Insert(rb, pA, fiA)
+	defer func() {
+		fA.Close()
+		os.Remove(fA.Name())
+	}()
+
+	pA := "path/to/a"
+	srcA := strings.NewReader("a")
+	fiA, err := apt.CopyWithFileInfo(fA, srcA, pA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cm.Insert(fA.Name(), fiA)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	dataBC := []byte{'b', 'c'}
-	pBC := "path/to/bc"
-	fiBC, err := makeFileInfo(pBC, dataBC)
+	fBC, err := storage.TempFile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb = bytes.NewReader(dataBC)
-	_, err = cm.Insert(rb, pBC, fiBC)
+	defer func() {
+		fBC.Close()
+		os.Remove(fBC.Name())
+	}()
+
+	pBC := "path/to/bc"
+	srcBC := strings.NewReader("bc")
+	fiBC, err := apt.CopyWithFileInfo(fBC, srcBC, pBC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cm.Insert(fBC.Name(), fiBC)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,14 +219,22 @@ func TestStorageLRU(t *testing.T) {
 	}
 
 	// a and bc will be purged
-	dataDE := []byte{'d', 'e'}
-	pDE := "path/to/de"
-	fiDE, err := makeFileInfo(pDE, dataDE)
+	fDE, err := storage.TempFile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rb = bytes.NewReader(dataDE)
-	_, err = cm.Insert(rb, pDE, fiDE)
+	defer func() {
+		fDE.Close()
+		os.Remove(fDE.Name())
+	}()
+
+	pDE := "path/to/de"
+	srcDE := strings.NewReader("de")
+	fiDE, err := apt.CopyWithFileInfo(fDE, srcDE, pDE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = cm.Insert(fDE.Name(), fiDE)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,8 +254,7 @@ func TestStorageLRU(t *testing.T) {
 		t.Error(`err != ErrNotFound`)
 	}
 
-	rb = bytes.NewReader(dataA)
-	_, err = cm.Insert(rb, pA, fiA)
+	_, err = cm.Insert(fA.Name(), fiA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,62 +373,5 @@ func TestStorageLoad(t *testing.T) {
 	}
 	if bytes.Compare(files["ghij"], data) != 0 {
 		t.Error(`bytes.Compare(files["ghij"], data) != 0`)
-	}
-}
-
-func TestStoragePathTraversal(t *testing.T) {
-	t.Parallel()
-
-	dir, err := ioutil.TempDir("", "gotest")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(dir)
-
-	cm := NewStorage(dir, 0)
-
-	data := []byte{'a'}
-	p := "/absolute/path"
-	fi, err := makeFileInfo(p, data)
-	if err != nil {
-		t.Error(err)
-	}
-	rb := bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != ErrBadPath {
-		t.Error(`/absolute/path must be a bad path`)
-	}
-
-	p = "./unclean/path"
-	fi, err = makeFileInfo(p, data)
-	if err != nil {
-		t.Error(err)
-	}
-	rb = bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != ErrBadPath {
-		t.Error(`./unclean/path must be a bad path`)
-	}
-
-	p = ""
-	fi, err = makeFileInfo(p, data)
-	if err != nil {
-		t.Error(err)
-	}
-	rb = bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != ErrBadPath {
-		t.Error(`empty path must be a bad path`)
-	}
-
-	p = "."
-	fi, err = makeFileInfo(p, data)
-	if err != nil {
-		t.Error(err)
-	}
-	rb = bytes.NewReader(data)
-	_, err = cm.Insert(rb, p, fi)
-	if err != ErrBadPath {
-		t.Error(`. must be a bad path`)
 	}
 }

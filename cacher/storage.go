@@ -2,7 +2,6 @@ package cacher
 
 import (
 	"container/heap"
-	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -190,55 +189,37 @@ func (cm *Storage) Load() error {
 	return nil
 }
 
+func (cm *Storage) TempFile() (*os.File, error) {
+	return ioutil.TempFile(cm.dir, "_tmp")
+}
+
 // Insert inserts or updates a cache item.
 //
 // p must be as clean as filepath.Clean() and
 // must not be filepath.IsAbs().
-func (cm *Storage) Insert(r io.Reader, p string, fi *apt.FileInfo) (*apt.FileInfo, error) {
+func (cm *Storage) Insert(filename string, fi *apt.FileInfo) error {
+	p := fi.Path()
 	switch {
 	case p != filepath.Clean(p):
-		return nil, ErrBadPath
+		return ErrBadPath
 	case filepath.IsAbs(p):
-		return nil, ErrBadPath
+		return ErrBadPath
 	case p == ".":
-		return nil, ErrBadPath
-	}
-
-	f, err := ioutil.TempFile(cm.dir, "_tmp")
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		f.Close()
-		os.Remove(f.Name())
-	}()
-
-	fi2, err := apt.CopyWithFileInfo(f, r, p)
-	if err != nil {
-		return nil, err
-	}
-
-	err = f.Sync()
-	if err != nil {
-		return nil, err
-	}
-
-	if fi != nil && fi.HasChecksum() && !fi.Same(fi2) {
-		return nil, ErrInvalidData
+		return ErrBadPath
 	}
 
 	destpath := filepath.Join(cm.dir, p+fileSuffix)
 	dirpath := filepath.Dir(destpath)
 
-	_, err = os.Stat(dirpath)
+	_, err := os.Stat(dirpath)
 	switch {
 	case os.IsNotExist(err):
 		err = os.MkdirAll(dirpath, 0755)
 		if err != nil {
-			return nil, err
+			return err
 		}
 	case err != nil:
-		return nil, err
+		return err
 	}
 
 	cm.mu.Lock()
@@ -248,7 +229,7 @@ func (cm *Storage) Insert(r io.Reader, p string, fi *apt.FileInfo) (*apt.FileInf
 		err = os.Remove(destpath)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return nil, err
+				return err
 			}
 			log.Warn("cache file was removed already", map[string]interface{}{
 				"path": p,
@@ -264,23 +245,23 @@ func (cm *Storage) Insert(r io.Reader, p string, fi *apt.FileInfo) (*apt.FileInf
 		}
 	}
 
-	err = os.Rename(f.Name(), destpath)
+	err = os.Link(filename, destpath)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	e := &entry{
-		FileInfo: fi2,
+		FileInfo: fi,
 		atime:    cm.lclock,
 	}
-	cm.used += fi2.Size()
+	cm.used += fi.Size()
 	cm.lclock++
 	heap.Push(cm, e)
 	cm.cache[p] = e
 
 	cm.maint()
 
-	return fi2, nil
+	return nil
 }
 
 func calcChecksum(dir string, e *entry) error {
